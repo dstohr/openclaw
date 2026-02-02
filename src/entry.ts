@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { applyCliProfileEnv, parseCliProfileArgs } from "./cli/profile.js";
@@ -40,8 +41,15 @@ function ensureExperimentalWarningSuppressed(): boolean {
   process.env.OPENCLAW_NODE_OPTIONS_READY = "1";
   process.env.NODE_OPTIONS = `${nodeOptions} ${EXPERIMENTAL_WARNING_FLAG}`.trim();
 
+  let stdio: import("node:child_process").StdioOptions = "inherit";
+  try {
+    fs.fstatSync(0);
+  } catch {
+    stdio = ["ignore", "inherit", "inherit"];
+  }
+
   const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
-    stdio: "inherit",
+    stdio,
     env: process.env,
   });
 

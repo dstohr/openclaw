@@ -110,7 +110,7 @@ export async function runCommandWithTimeout(
     }
   }
 
-  const stdio = resolveCommandStdio({ hasInput, preferInherit: true });
+  const stdio = resolveCommandStdio({ hasInput, preferInherit: true, stdin: process.stdin });
   const child = spawn(resolveCommand(argv[0]), argv.slice(1), {
     stdio,
     cwd,

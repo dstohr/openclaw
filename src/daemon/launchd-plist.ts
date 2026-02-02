@@ -86,6 +86,7 @@ export function buildLaunchAgentPlist({
   workingDirectory,
   stdoutPath,
   stderrPath,
+  stdinPath,
   environment,
 }: {
   label: string;
@@ -94,6 +95,7 @@ export function buildLaunchAgentPlist({
   workingDirectory?: string;
   stdoutPath: string;
   stderrPath: string;
+  stdinPath?: string;
   environment?: Record<string, string | undefined>;
 }): string {
   const argsXml = programArguments
@@ -106,5 +108,8 @@ export function buildLaunchAgentPlist({
     ? `\n    <key>Comment</key>\n    <string>${plistEscape(comment.trim())}</string>`
     : "";
   const envXml = renderEnvDict(environment);
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n  <dict>\n    <key>Label</key>\n    <string>${plistEscape(label)}</string>\n    ${commentXml}\n    <key>RunAtLoad</key>\n    <true/>\n    <key>KeepAlive</key>\n    <true/>\n    <key>ProgramArguments</key>\n    <array>${argsXml}\n    </array>\n    ${workingDirXml}\n    <key>StandardOutPath</key>\n    <string>${plistEscape(stdoutPath)}</string>\n    <key>StandardErrorPath</key>\n    <string>${plistEscape(stderrPath)}</string>${envXml}\n  </dict>\n</plist>\n`;
+  const stdinXml = stdinPath
+    ? `\n    <key>StandardInPath</key>\n    <string>${plistEscape(stdinPath)}</string>`
+    : "";
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n  <dict>\n    <key>Label</key>\n    <string>${plistEscape(label)}</string>\n    ${commentXml}\n    <key>RunAtLoad</key>\n    <true/>\n    <key>KeepAlive</key>\n    <true/>\n    <key>ProgramArguments</key>\n    <array>${argsXml}\n    </array>\n    ${workingDirXml}\n    <key>StandardOutPath</key>\n    <string>${plistEscape(stdoutPath)}</string>\n    <key>StandardErrorPath</key>\n    <string>${plistEscape(stderrPath)}</string>${stdinXml}${envXml}\n  </dict>\n</plist>\n`;
 }

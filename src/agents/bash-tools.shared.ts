@@ -1,4 +1,4 @@
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import fs from "node:fs/promises";
 import { homedir } from "node:os";
@@ -115,7 +115,7 @@ export async function resolveSandboxWorkdir(params: {
   }
 }
 
-export function killSession(session: { pid?: number; child?: ChildProcessWithoutNullStreams }) {
+export function killSession(session: { pid?: number; child?: ChildProcess }) {
   const pid = session.pid ?? session.child?.pid;
   if (pid) {
     killProcessTree(pid);

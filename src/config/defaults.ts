@@ -298,7 +298,8 @@ export function applyAgentDefaults(cfg: OpenClawConfig): OpenClawConfig {
   const hasSubMax =
     typeof defaults?.subagents?.maxConcurrent === "number" &&
     Number.isFinite(defaults.subagents.maxConcurrent);
-  if (hasMax && hasSubMax) {
+  const hasModel = defaults?.model !== undefined;
+  if (hasMax && hasSubMax && hasModel) {
     return cfg;
   }
 
@@ -309,9 +310,18 @@ export function applyAgentDefaults(cfg: OpenClawConfig): OpenClawConfig {
     mutated = true;
   }
 
-  const nextSubagents = defaults?.subagents ? { ...defaults.subagents } : {};
   if (!hasSubMax) {
-    nextSubagents.maxConcurrent = DEFAULT_SUBAGENT_MAX_CONCURRENT;
+    nextDefaults.subagents = defaults?.subagents
+      ? { ...defaults.subagents, maxConcurrent: DEFAULT_SUBAGENT_MAX_CONCURRENT }
+      : { maxConcurrent: DEFAULT_SUBAGENT_MAX_CONCURRENT };
+    mutated = true;
+  }
+
+  if (!hasModel) {
+    nextDefaults.model = {
+      primary: "openai/gpt-5.2",
+      fallbacks: ["anthropic/claude-opus-4-5"],
+    };
     mutated = true;
   }
 
@@ -323,10 +333,7 @@ export function applyAgentDefaults(cfg: OpenClawConfig): OpenClawConfig {
     ...cfg,
     agents: {
       ...agents,
-      defaults: {
-        ...nextDefaults,
-        subagents: nextSubagents,
-      },
+      defaults: nextDefaults,
     },
   };
 }

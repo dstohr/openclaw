@@ -591,7 +591,12 @@ function printResult(result: UpdateRunResult, opts: PrintResultOptions) {
 }
 
 export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
-  process.noDeprecation = true;
+  // Best-effort: Node 24+ can expose process warning toggles as read-only in some environments.
+  try {
+    process.noDeprecation = true;
+  } catch {
+    // ignore
+  }
   process.env.NODE_NO_WARNINGS = "1";
   const timeoutMs = opts.timeout ? Number.parseInt(opts.timeout, 10) * 1000 : undefined;
   const shouldRestart = opts.restart !== false;

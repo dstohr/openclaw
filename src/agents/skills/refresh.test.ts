@@ -1,3 +1,4 @@
+import type { Stats } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 
 const watchMock = vi.fn(() => ({
@@ -19,13 +20,33 @@ describe("ensureSkillsWatcher", () => {
     expect(watchMock).toHaveBeenCalledTimes(1);
     const opts = watchMock.mock.calls[0]?.[1] as { ignored?: unknown };
 
-    expect(opts.ignored).toBe(mod.DEFAULT_SKILLS_WATCH_IGNORED);
-    const ignored = mod.DEFAULT_SKILLS_WATCH_IGNORED;
-    expect(ignored.some((re) => re.test("/tmp/workspace/skills/node_modules/pkg/index.js"))).toBe(
-      true,
-    );
-    expect(ignored.some((re) => re.test("/tmp/workspace/skills/dist/index.js"))).toBe(true);
-    expect(ignored.some((re) => re.test("/tmp/workspace/skills/.git/config"))).toBe(true);
-    expect(ignored.some((re) => re.test("/tmp/.hidden/skills/index.md"))).toBe(false);
+    expect(typeof opts.ignored).toBe("function");
+
+    const ignored = opts.ignored as (pathname: string, stats?: Stats) => boolean;
+    expect(ignored("/tmp/workspace/skills/node_modules/pkg/index.js")).toBe(true);
+    expect(ignored("/tmp/workspace/skills/dist/index.js")).toBe(true);
+    expect(ignored("/tmp/workspace/skills/.git/config")).toBe(true);
+
+    expect(ignored("/tmp/workspace/skills/foo/SKILL.md")).toBe(false);
+    expect(ignored("/tmp/workspace/skills/foo/_meta.json")).toBe(false);
+    expect(
+      ignored("/tmp/workspace/skills/foo", { isDirectory: () => true } as unknown as Stats),
+    ).toBe(false);
+    expect(ignored("/tmp/workspace/skills/foo/readme.md")).toBe(true);
+
+    expect(
+      mod.DEFAULT_SKILLS_WATCH_IGNORED.some((re) =>
+        re.test("/tmp/workspace/skills/node_modules/pkg/index.js"),
+      ),
+    ).toBe(true);
+    expect(
+      mod.DEFAULT_SKILLS_WATCH_IGNORED.some((re) => re.test("/tmp/workspace/skills/dist/index.js")),
+    ).toBe(true);
+    expect(
+      mod.DEFAULT_SKILLS_WATCH_IGNORED.some((re) => re.test("/tmp/workspace/skills/.git/config")),
+    ).toBe(true);
+    expect(
+      mod.DEFAULT_SKILLS_WATCH_IGNORED.some((re) => re.test("/tmp/.hidden/skills/index.md")),
+    ).toBe(false);
   });
 });

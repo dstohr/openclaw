@@ -12,6 +12,11 @@ export type SpawnWithFallbackResult = {
   fallbackLabel?: string;
 };
 
+type StdinLike = {
+  fd?: number | null;
+  destroyed?: boolean;
+};
+
 type SpawnWithFallbackParams = {
   argv: string[];
   options: SpawnOptions;
@@ -21,13 +26,30 @@ type SpawnWithFallbackParams = {
   onFallback?: (err: unknown, fallback: SpawnFallback) => void;
 };
 
-const DEFAULT_RETRY_CODES = ["EBADF"];
+const DEFAULT_RETRY_CODES = ["EBADF", "EINVAL"];
+
+function isUsableStdin(stdin?: StdinLike): boolean {
+  const input = stdin ?? process.stdin;
+  if (!input) {
+    return false;
+  }
+  if (input.destroyed) {
+    return false;
+  }
+  const fd = typeof input.fd === "number" ? input.fd : null;
+  if (fd == null || Number.isNaN(fd) || fd < 0) {
+    return false;
+  }
+  return true;
+}
 
 export function resolveCommandStdio(params: {
   hasInput: boolean;
   preferInherit: boolean;
+  stdin?: StdinLike;
 }): ["pipe" | "inherit" | "ignore", "pipe", "pipe"] {
-  const stdin = params.hasInput ? "pipe" : params.preferInherit ? "inherit" : "pipe";
+  const canInherit = params.preferInherit && isUsableStdin(params.stdin);
+  const stdin = params.hasInput ? "pipe" : canInherit ? "inherit" : "pipe";
   return [stdin, "pipe", "pipe"];
 }
 

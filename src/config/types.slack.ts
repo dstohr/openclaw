@@ -42,6 +42,8 @@ export type SlackChannelConfig = {
   skills?: string[];
   /** Optional system prompt for this channel. */
   systemPrompt?: string;
+  /** Optional model override for this channel. */
+  model?: string;
 };
 
 export type SlackReactionNotificationMode = "off" | "own" | "all" | "allowlist";

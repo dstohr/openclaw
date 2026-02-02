@@ -2,7 +2,7 @@ import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { spawnWithFallback } from "./spawn-utils.js";
+import { resolveCommandStdio, spawnWithFallback } from "./spawn-utils.js";
 
 function createStubChild() {
   const child = new EventEmitter() as ChildProcess;
@@ -59,5 +59,27 @@ describe("spawnWithFallback", () => {
       }),
     ).rejects.toThrow(/ENOENT/);
     expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("resolveCommandStdio", () => {
+  it("inherits stdin when preferred and valid", () => {
+    const stdio = resolveCommandStdio({
+      hasInput: false,
+      preferInherit: true,
+      stdin: { fd: 0, destroyed: false },
+    });
+
+    expect(stdio).toEqual(["inherit", "pipe", "pipe"]);
+  });
+
+  it("falls back to pipe when stdin is invalid", () => {
+    const stdio = resolveCommandStdio({
+      hasInput: false,
+      preferInherit: true,
+      stdin: { fd: -1, destroyed: true },
+    });
+
+    expect(stdio).toEqual(["pipe", "pipe", "pipe"]);
   });
 });

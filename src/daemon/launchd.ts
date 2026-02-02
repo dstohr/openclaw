@@ -80,6 +80,7 @@ export function buildLaunchAgentPlist({
   workingDirectory,
   stdoutPath,
   stderrPath,
+  stdinPath,
   environment,
 }: {
   label?: string;
@@ -88,6 +89,7 @@ export function buildLaunchAgentPlist({
   workingDirectory?: string;
   stdoutPath: string;
   stderrPath: string;
+  stdinPath?: string;
   environment?: Record<string, string | undefined>;
 }): string {
   return buildLaunchAgentPlistImpl({
@@ -97,6 +99,7 @@ export function buildLaunchAgentPlist({
     workingDirectory,
     stdoutPath,
     stderrPath,
+    stdinPath,
     environment,
   });
 }
@@ -396,6 +399,14 @@ export async function installLaunchAgent({
 }): Promise<{ plistPath: string }> {
   const { logDir, stdoutPath, stderrPath } = resolveGatewayLogPaths(env);
   await fs.mkdir(logDir, { recursive: true });
+  let stdinPath: string | undefined = path.join(resolveHomeDir(env), ".openclaw", "stdin");
+  try {
+    await fs.mkdir(path.dirname(stdinPath), { recursive: true });
+    // Keep stdin stable under launchd to avoid sporadic EBADF/EINVAL on child spawns.
+    await fs.writeFile(stdinPath, "", { flag: "a" });
+  } catch {
+    stdinPath = process.platform === "win32" ? undefined : "/dev/null";
+  }
 
   const domain = resolveGuiDomain();
   const label = resolveLaunchAgentLabel({ env });
@@ -426,6 +437,7 @@ export async function installLaunchAgent({
     workingDirectory,
     stdoutPath,
     stderrPath,
+    stdinPath,
     environment,
   });
   await fs.writeFile(plistPath, plist, "utf8");

@@ -1,4 +1,5 @@
 import chokidar, { type FSWatcher } from "chokidar";
+import fs from "node:fs";
 import path from "node:path";
 import type { OpenClawConfig } from "../../config/config.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
@@ -29,7 +30,40 @@ export const DEFAULT_SKILLS_WATCH_IGNORED: RegExp[] = [
   /(^|[\\/])\.git([\\/]|$)/,
   /(^|[\\/])node_modules([\\/]|$)/,
   /(^|[\\/])dist([\\/]|$)/,
+  /(^|[\\/])\.venv([\\/]|$)/,
+  /(^|[\\/])__pycache__([\\/]|$)/,
+  /(^|[\\/])\.pytest_cache([\\/]|$)/,
+  /(^|[\\/])\.mypy_cache([\\/]|$)/,
+  /(^|[\\/])\.ruff_cache([\\/]|$)/,
+  /(^|[\\/])\.tox([\\/]|$)/,
+  /(^|[\\/])_removed([\\/]|$)/,
 ];
+
+function shouldIgnoreSkillsWatchPath(pathname: string, stats?: fs.Stats): boolean {
+  // Ignore known huge / irrelevant trees first.
+  for (const pattern of DEFAULT_SKILLS_WATCH_IGNORED) {
+    if (pattern.test(pathname)) {
+      return true;
+    }
+  }
+
+  if (stats?.isDirectory()) {
+    return false;
+  }
+
+  // Only watch the files that define skill availability/metadata.
+  // Watching entire skill directories can explode into tens of thousands of file descriptors on macOS
+  // when chokidar falls back to fs.watch (no fsevents).
+  const normalized = pathname.replace(/\\/g, "/");
+  const base = normalized.split("/").pop() ?? "";
+  if (!base) {
+    return false;
+  }
+  if (base === "SKILL.md" || base === "_meta.json") {
+    return false;
+  }
+  return true;
+}
 
 function bumpVersion(current: number): number {
   const now = Date.now();
@@ -136,13 +170,16 @@ export function ensureSkillsWatcher(params: { workspaceDir: string; config?: Ope
 
   const watcher = chokidar.watch(watchPaths, {
     ignoreInitial: true,
+    alwaysStat: true,
+    // Skill definitions live at skills/<name>/SKILL.md (+ optional metadata). No need to descend further.
+    depth: 2,
     awaitWriteFinish: {
       stabilityThreshold: debounceMs,
       pollInterval: 100,
     },
     // Avoid FD exhaustion on macOS when a workspace contains huge trees.
     // This watcher only needs to react to skill changes.
-    ignored: DEFAULT_SKILLS_WATCH_IGNORED,
+    ignored: shouldIgnoreSkillsWatchPath,
   });
 
   const state: SkillsWatchState = { watcher, pathsKey, debounceMs };

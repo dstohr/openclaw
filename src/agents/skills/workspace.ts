@@ -1,8 +1,4 @@
-import {
-  formatSkillsForPrompt,
-  loadSkillsFromDir,
-  type Skill,
-} from "@mariozechner/pi-coding-agent";
+import { formatSkillsForPrompt, type Skill } from "@mariozechner/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";
 import type { OpenClawConfig } from "../../config/config.js";
@@ -28,6 +24,75 @@ import { serializeByKey } from "./serialize.js";
 const fsp = fs.promises;
 const skillsLogger = createSubsystemLogger("skills");
 const skillCommandDebugOnce = new Set<string>();
+
+function loadSkillsFromDirSafe(params: { dir: string; source: string }): Skill[] {
+  if (!params.dir.trim()) {
+    return [];
+  }
+  try {
+    if (!fs.existsSync(params.dir)) {
+      return [];
+    }
+  } catch {
+    return [];
+  }
+
+  const loadSkillFromBaseDir = (baseDir: string): Skill | null => {
+    const skillPath = path.join(baseDir, "SKILL.md");
+    try {
+      const raw = fs.readFileSync(skillPath, "utf-8");
+      const frontmatter = parseFrontmatter(raw);
+      const nameRaw = frontmatter.name;
+      const descRaw = frontmatter.description;
+      const name =
+        typeof nameRaw === "string" && nameRaw.trim().length > 0
+          ? nameRaw.trim()
+          : path.basename(baseDir);
+      const description = typeof descRaw === "string" ? descRaw.trim() : "";
+      return {
+        name,
+        description,
+        disableModelInvocation: false,
+        source: params.source,
+        filePath: skillPath,
+        baseDir,
+      } satisfies Skill;
+    } catch {
+      return null;
+    }
+  };
+
+  // Support passing a single skill dir directly.
+  const direct = loadSkillFromBaseDir(params.dir);
+  if (direct) {
+    return [direct];
+  }
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(params.dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const skills: Skill[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    // Avoid hidden dirs; individual skill dirs are expected to be top-level.
+    if (entry.name.startsWith(".")) {
+      continue;
+    }
+    const baseDir = path.join(params.dir, entry.name);
+    const loaded = loadSkillFromBaseDir(baseDir);
+    if (loaded) {
+      skills.push(loaded);
+    }
+  }
+
+  return skills;
+}
 
 function debugSkillCommandOnce(
   messageKey: string,
@@ -104,22 +169,6 @@ function loadSkillEntries(
     bundledSkillsDir?: string;
   },
 ): SkillEntry[] {
-  const loadSkills = (params: { dir: string; source: string }): Skill[] => {
-    const loaded = loadSkillsFromDir(params);
-    if (Array.isArray(loaded)) {
-      return loaded;
-    }
-    if (
-      loaded &&
-      typeof loaded === "object" &&
-      "skills" in loaded &&
-      Array.isArray((loaded as { skills?: unknown }).skills)
-    ) {
-      return (loaded as { skills: Skill[] }).skills;
-    }
-    return [];
-  };
-
   const managedSkillsDir = opts?.managedSkillsDir ?? path.join(CONFIG_DIR, "skills");
   const workspaceSkillsDir = path.join(workspaceDir, "skills");
   const bundledSkillsDir = opts?.bundledSkillsDir ?? resolveBundledSkillsDir();
@@ -134,23 +183,23 @@ function loadSkillEntries(
   const mergedExtraDirs = [...extraDirs, ...pluginSkillDirs];
 
   const bundledSkills = bundledSkillsDir
-    ? loadSkills({
+    ? loadSkillsFromDirSafe({
         dir: bundledSkillsDir,
         source: "openclaw-bundled",
       })
     : [];
   const extraSkills = mergedExtraDirs.flatMap((dir) => {
     const resolved = resolveUserPath(dir);
-    return loadSkills({
+    return loadSkillsFromDirSafe({
       dir: resolved,
       source: "openclaw-extra",
     });
   });
-  const managedSkills = loadSkills({
+  const managedSkills = loadSkillsFromDirSafe({
     dir: managedSkillsDir,
     source: "openclaw-managed",
   });
-  const workspaceSkills = loadSkills({
+  const workspaceSkills = loadSkillsFromDirSafe({
     dir: workspaceSkillsDir,
     source: "openclaw-workspace",
   });

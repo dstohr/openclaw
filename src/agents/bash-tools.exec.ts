@@ -1,7 +1,10 @@
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { Type } from "@sinclair/typebox";
+import { spawn } from "node:child_process";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { BashSandboxConfig } from "./bash-tools.shared.js";
 import {
@@ -161,6 +164,12 @@ type ExecProcessHandle = {
   pid?: number;
   promise: Promise<ExecProcessOutcome>;
   kill: () => void;
+};
+
+type OutputCaptureFiles = {
+  dir: string;
+  stdoutPath: string;
+  stderrPath: string;
 };
 
 export type ExecToolDefaults = {
@@ -418,6 +427,101 @@ function emitExecSystemEvent(text: string, opts: { sessionKey?: string; contextK
   requestHeartbeatNow({ reason: "exec-event" });
 }
 
+function isSpawnBadFd(err: unknown): boolean {
+  if (!err || typeof err !== "object" || !("code" in err)) {
+    return false;
+  }
+  const code = String((err as { code?: unknown }).code);
+  return code === "EBADF" || code === "EINVAL";
+}
+
+function formatSpawnContext(params: { argv: string[]; options: SpawnOptions }): string {
+  const stdio = Array.isArray(params.options.stdio)
+    ? params.options.stdio
+    : (params.options.stdio ?? "pipe");
+  const fdValue = (value: unknown) => (typeof value === "number" ? value : null);
+  return `ctx=${JSON.stringify({
+    argv0: params.argv[0],
+    cwd: params.options.cwd ?? "",
+    detached: Boolean(params.options.detached),
+    stdio,
+    stdinFd: fdValue(process.stdin?.fd),
+    stdoutFd: fdValue(process.stdout?.fd),
+    stderrFd: fdValue(process.stderr?.fd),
+  })}`;
+}
+
+function createFileCapture(): {
+  files: OutputCaptureFiles;
+  stdio: [number, number, number];
+  cleanup: () => void;
+} {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-exec-"));
+  const stdoutPath = path.join(dir, "stdout.log");
+  const stderrPath = path.join(dir, "stderr.log");
+  const nullDevice = process.platform === "win32" ? "NUL" : "/dev/null";
+  const stdinFd = fs.openSync(nullDevice, "r");
+  const stdoutFd = fs.openSync(stdoutPath, "w");
+  const stderrFd = fs.openSync(stderrPath, "w");
+  const cleanup = () => {
+    fs.closeSync(stdinFd);
+    fs.closeSync(stdoutFd);
+    fs.closeSync(stderrFd);
+  };
+  return {
+    files: { dir, stdoutPath, stderrPath },
+    stdio: [stdinFd, stdoutFd, stderrFd],
+    cleanup,
+  };
+}
+
+async function readTextFileTail(filePath: string, maxBytes: number): Promise<string> {
+  const limit = Math.max(0, Math.floor(maxBytes));
+  if (limit === 0) {
+    return "";
+  }
+  try {
+    const handle = await fs.promises.open(filePath, "r");
+    try {
+      const stat = await handle.stat();
+      const size = stat.size;
+      if (size <= 0) {
+        return "";
+      }
+      const start = Math.max(0, size - limit);
+      const length = Math.max(0, size - start);
+      if (length === 0) {
+        return "";
+      }
+      const buffer = Buffer.alloc(length);
+      await handle.read(buffer, 0, length, start);
+      return buffer.toString("utf8");
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
+  } catch {
+    return "";
+  }
+}
+
+async function readCaptureFiles(
+  files: OutputCaptureFiles | null,
+  maxBytes: number,
+): Promise<{ stdout: string; stderr: string }> {
+  if (!files) {
+    return { stdout: "", stderr: "" };
+  }
+  try {
+    const [stdout, stderr] = await Promise.all([
+      readTextFileTail(files.stdoutPath, maxBytes),
+      readTextFileTail(files.stderrPath, maxBytes),
+    ]);
+    return { stdout, stderr };
+  } finally {
+    await fs.promises.rm(files.dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 async function runExecProcess(opts: {
   command: string;
   workdir: string;
@@ -436,44 +540,93 @@ async function runExecProcess(opts: {
 }): Promise<ExecProcessHandle> {
   const startedAt = Date.now();
   const sessionId = createSessionSlug();
-  let child: ChildProcessWithoutNullStreams | null = null;
+  let child: ChildProcess | null = null;
   let pty: PtyHandle | null = null;
   let stdin: SessionStdin | undefined;
+  let captureFiles: OutputCaptureFiles | null = null;
+
+  const spawnWithFileCapture = (argv: string[], options: SpawnOptions): ChildProcess => {
+    const { files, stdio, cleanup } = createFileCapture();
+    try {
+      const spawned = spawn(argv[0], argv.slice(1), {
+        ...options,
+        stdio,
+        detached: false,
+      });
+      cleanup();
+      captureFiles = files;
+      return spawned;
+    } catch (err) {
+      cleanup();
+      fs.rmSync(files.dir, { recursive: true, force: true });
+      throw err;
+    }
+  };
 
   if (opts.sandbox) {
-    const { child: spawned } = await spawnWithFallback({
-      argv: [
-        "docker",
-        ...buildDockerExecArgs({
-          containerName: opts.sandbox.containerName,
-          command: opts.command,
-          workdir: opts.containerWorkdir ?? opts.sandbox.containerWorkdir,
-          env: opts.env,
-          tty: opts.usePty,
-        }),
-      ],
-      options: {
-        cwd: opts.workdir,
-        env: process.env,
-        detached: process.platform !== "win32",
-        stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true,
-      },
-      fallbacks: [
-        {
-          label: "no-detach",
-          options: { detached: false },
+    const argv = [
+      "docker",
+      ...buildDockerExecArgs({
+        containerName: opts.sandbox.containerName,
+        command: opts.command,
+        workdir: opts.containerWorkdir ?? opts.sandbox.containerWorkdir,
+        env: opts.env,
+        tty: opts.usePty,
+      }),
+    ];
+    const options: SpawnOptions = {
+      cwd: opts.workdir,
+      env: process.env,
+      detached: process.platform !== "win32",
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    };
+    try {
+      const { child: spawned } = await spawnWithFallback({
+        argv,
+        options,
+        fallbacks: [
+          {
+            label: "no-detach",
+            options: { detached: false },
+          },
+          {
+            label: "ignore-stdin",
+            options: { detached: false, stdio: ["ignore", "pipe", "pipe"] },
+          },
+        ],
+        onFallback: (err, fallback) => {
+          const errText = formatSpawnError(err);
+          const warning = `Warning: spawn failed (${errText}); retrying with ${fallback.label}.`;
+          const context = formatSpawnContext({ argv, options });
+          logWarn(`exec: spawn failed (${errText}); retrying with ${fallback.label}. ${context}`);
+          opts.warnings.push(warning);
         },
-      ],
-      onFallback: (err, fallback) => {
-        const errText = formatSpawnError(err);
-        const warning = `Warning: spawn failed (${errText}); retrying with ${fallback.label}.`;
-        logWarn(`exec: spawn failed (${errText}); retrying with ${fallback.label}.`);
-        opts.warnings.push(warning);
-      },
-    });
-    child = spawned as ChildProcessWithoutNullStreams;
-    stdin = child.stdin;
+      });
+      child = spawned;
+      stdin = child.stdin ?? undefined;
+    } catch (err) {
+      if (!isSpawnBadFd(err)) {
+        throw err;
+      }
+      const errText = formatSpawnError(err);
+      const warning = `Warning: spawn failed (${errText}); retrying with file-capture stdio.`;
+      const context = formatSpawnContext({ argv, options });
+      logWarn(`exec: spawn failed (${errText}); retrying with file-capture stdio. ${context}`);
+      opts.warnings.push(warning);
+      try {
+        child = spawnWithFileCapture(argv, options);
+      } catch (innerErr) {
+        logWarn(
+          `exec: file-capture spawn failed (${formatSpawnError(innerErr)}); falling back to ignore-all.`,
+        );
+        const { child: spawned } = await spawnWithFallback({
+          argv,
+          options: { ...options, stdio: "ignore" },
+        });
+        child = spawned;
+      }
+    }
   } else if (opts.usePty) {
     const { shell, args: shellArgs } = getShellConfig();
     try {
@@ -516,57 +669,119 @@ async function runExecProcess(opts: {
       const warning = `Warning: PTY spawn failed (${errText}); retrying without PTY for \`${opts.command}\`.`;
       logWarn(`exec: PTY spawn failed (${errText}); retrying without PTY for "${opts.command}".`);
       opts.warnings.push(warning);
-      const { child: spawned } = await spawnWithFallback({
-        argv: [shell, ...shellArgs, opts.command],
-        options: {
-          cwd: opts.workdir,
-          env: opts.env,
-          detached: process.platform !== "win32",
-          stdio: ["pipe", "pipe", "pipe"],
-          windowsHide: true,
-        },
-        fallbacks: [
-          {
-            label: "no-detach",
-            options: { detached: false },
-          },
-        ],
-        onFallback: (fallbackErr, fallback) => {
-          const fallbackText = formatSpawnError(fallbackErr);
-          const fallbackWarning = `Warning: spawn failed (${fallbackText}); retrying with ${fallback.label}.`;
-          logWarn(`exec: spawn failed (${fallbackText}); retrying with ${fallback.label}.`);
-          opts.warnings.push(fallbackWarning);
-        },
-      });
-      child = spawned as ChildProcessWithoutNullStreams;
-      stdin = child.stdin;
-    }
-  } else {
-    const { shell, args: shellArgs } = getShellConfig();
-    const { child: spawned } = await spawnWithFallback({
-      argv: [shell, ...shellArgs, opts.command],
-      options: {
+      const argv = [shell, ...shellArgs, opts.command];
+      const options: SpawnOptions = {
         cwd: opts.workdir,
         env: opts.env,
         detached: process.platform !== "win32",
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
-      },
-      fallbacks: [
-        {
-          label: "no-detach",
-          options: { detached: false },
-        },
-      ],
-      onFallback: (err, fallback) => {
+      };
+      try {
+        const { child: spawned } = await spawnWithFallback({
+          argv,
+          options,
+          fallbacks: [
+            {
+              label: "no-detach",
+              options: { detached: false },
+            },
+            {
+              label: "ignore-stdin",
+              options: { detached: false, stdio: ["ignore", "pipe", "pipe"] },
+            },
+          ],
+          onFallback: (fallbackErr, fallback) => {
+            const fallbackText = formatSpawnError(fallbackErr);
+            const fallbackWarning = `Warning: spawn failed (${fallbackText}); retrying with ${fallback.label}.`;
+            const context = formatSpawnContext({ argv, options });
+            logWarn(
+              `exec: spawn failed (${fallbackText}); retrying with ${fallback.label}. ${context}`,
+            );
+            opts.warnings.push(fallbackWarning);
+          },
+        });
+        child = spawned;
+        stdin = child.stdin ?? undefined;
+      } catch (err) {
+        if (!isSpawnBadFd(err)) {
+          throw err;
+        }
         const errText = formatSpawnError(err);
-        const warning = `Warning: spawn failed (${errText}); retrying with ${fallback.label}.`;
-        logWarn(`exec: spawn failed (${errText}); retrying with ${fallback.label}.`);
+        const warning = `Warning: spawn failed (${errText}); retrying with file-capture stdio.`;
+        const context = formatSpawnContext({ argv, options });
+        logWarn(`exec: spawn failed (${errText}); retrying with file-capture stdio. ${context}`);
         opts.warnings.push(warning);
-      },
-    });
-    child = spawned as ChildProcessWithoutNullStreams;
-    stdin = child.stdin;
+        try {
+          child = spawnWithFileCapture(argv, options);
+        } catch (innerErr) {
+          logWarn(
+            `exec: file-capture spawn failed (${formatSpawnError(innerErr)}); falling back to ignore-all.`,
+          );
+          const { child: spawned } = await spawnWithFallback({
+            argv,
+            options: { ...options, stdio: "ignore" },
+          });
+          child = spawned;
+        }
+      }
+    }
+  } else {
+    const { shell, args: shellArgs } = getShellConfig();
+    const argv = [shell, ...shellArgs, opts.command];
+    const options: SpawnOptions = {
+      cwd: opts.workdir,
+      env: opts.env,
+      detached: process.platform !== "win32",
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    };
+    try {
+      const { child: spawned } = await spawnWithFallback({
+        argv,
+        options,
+        fallbacks: [
+          {
+            label: "no-detach",
+            options: { detached: false },
+          },
+          {
+            label: "ignore-stdin",
+            options: { detached: false, stdio: ["ignore", "pipe", "pipe"] },
+          },
+        ],
+        onFallback: (err, fallback) => {
+          const errText = formatSpawnError(err);
+          const warning = `Warning: spawn failed (${errText}); retrying with ${fallback.label}.`;
+          const context = formatSpawnContext({ argv, options });
+          logWarn(`exec: spawn failed (${errText}); retrying with ${fallback.label}. ${context}`);
+          opts.warnings.push(warning);
+        },
+      });
+      child = spawned;
+      stdin = child.stdin ?? undefined;
+    } catch (err) {
+      if (!isSpawnBadFd(err)) {
+        throw err;
+      }
+      const errText = formatSpawnError(err);
+      const warning = `Warning: spawn failed (${errText}); retrying with file-capture stdio.`;
+      const context = formatSpawnContext({ argv, options });
+      logWarn(`exec: spawn failed (${errText}); retrying with file-capture stdio. ${context}`);
+      opts.warnings.push(warning);
+      try {
+        child = spawnWithFileCapture(argv, options);
+      } catch (innerErr) {
+        logWarn(
+          `exec: file-capture spawn failed (${formatSpawnError(innerErr)}); falling back to ignore-all.`,
+        );
+        const { child: spawned } = await spawnWithFallback({
+          argv,
+          options: { ...options, stdio: "ignore" },
+        });
+        child = spawned;
+      }
+    }
   }
 
   const session = {
@@ -696,72 +911,107 @@ async function runExecProcess(opts: {
       handleStdout(cleaned);
     });
   } else if (child) {
-    child.stdout.on("data", handleStdout);
-    child.stderr.on("data", handleStderr);
+    child.stdout?.on("data", handleStdout);
+    child.stderr?.on("data", handleStderr);
   }
 
   const promise = new Promise<ExecProcessOutcome>((resolve) => {
     resolveFn = resolve;
-    const handleExit = (code: number | null, exitSignal: NodeJS.Signals | number | null) => {
-      if (timeoutTimer) {
-        clearTimeout(timeoutTimer);
-      }
-      if (timeoutFinalizeTimer) {
-        clearTimeout(timeoutFinalizeTimer);
-      }
-      const durationMs = Date.now() - startedAt;
-      const wasSignal = exitSignal != null;
-      const isSuccess = code === 0 && !wasSignal && !timedOut;
-      const status: "completed" | "failed" = isSuccess ? "completed" : "failed";
-      markExited(session, code, exitSignal, status);
-      maybeNotifyOnExit(session, status);
-      if (!session.child && session.stdin) {
-        session.stdin.destroyed = true;
-      }
+    const handleExit = async (code: number | null, exitSignal: NodeJS.Signals | number | null) => {
+      try {
+        if (timeoutTimer) {
+          clearTimeout(timeoutTimer);
+        }
+        if (timeoutFinalizeTimer) {
+          clearTimeout(timeoutFinalizeTimer);
+        }
+        const durationMs = Date.now() - startedAt;
+        const wasSignal = exitSignal != null;
+        const isSuccess = code === 0 && !wasSignal && !timedOut;
+        const status: "completed" | "failed" = isSuccess ? "completed" : "failed";
+        if (captureFiles) {
+          const captured = await readCaptureFiles(captureFiles, opts.maxOutput);
+          if (captured.stdout) {
+            handleStdout(captured.stdout);
+          }
+          if (captured.stderr) {
+            handleStderr(captured.stderr);
+          }
+          captureFiles = null;
+        }
+        markExited(session, code, exitSignal, status);
+        maybeNotifyOnExit(session, status);
+        if (!session.child && session.stdin) {
+          session.stdin.destroyed = true;
+        }
 
-      if (settled) {
-        return;
-      }
-      const aggregated = session.aggregated.trim();
-      if (!isSuccess) {
-        const reason = timedOut
-          ? `Command timed out after ${opts.timeoutSec} seconds`
-          : wasSignal && exitSignal
-            ? `Command aborted by signal ${exitSignal}`
-            : code === null
-              ? "Command aborted before exit code was captured"
-              : `Command exited with code ${code}`;
-        const message = aggregated ? `${aggregated}\n\n${reason}` : reason;
+        if (settled) {
+          return;
+        }
+        const aggregated = session.aggregated.trim();
+        if (!isSuccess) {
+          const reason = timedOut
+            ? `Command timed out after ${opts.timeoutSec} seconds`
+            : wasSignal && exitSignal
+              ? `Command aborted by signal ${exitSignal}`
+              : code === null
+                ? "Command aborted before exit code was captured"
+                : `Command exited with code ${code}`;
+          const message = aggregated ? `${aggregated}\n\n${reason}` : reason;
+          settle({
+            status: "failed",
+            exitCode: code ?? null,
+            exitSignal: exitSignal ?? null,
+            durationMs,
+            aggregated,
+            timedOut,
+            reason: message,
+          });
+          return;
+        }
+        settle({
+          status: "completed",
+          exitCode: code ?? 0,
+          exitSignal: exitSignal ?? null,
+          durationMs,
+          aggregated,
+          timedOut: false,
+        });
+      } catch (err) {
+        if (timeoutTimer) {
+          clearTimeout(timeoutTimer);
+        }
+        if (timeoutFinalizeTimer) {
+          clearTimeout(timeoutFinalizeTimer);
+        }
+        logWarn(`exec: handleExit failed (${String(err)})`);
+        if (!session.exited) {
+          markExited(session, code, exitSignal, "failed");
+          maybeNotifyOnExit(session, "failed");
+        }
+        const aggregated = session.aggregated.trim();
+        const message = aggregated ? `${aggregated}\n\n${String(err)}` : String(err);
         settle({
           status: "failed",
           exitCode: code ?? null,
           exitSignal: exitSignal ?? null,
-          durationMs,
+          durationMs: Date.now() - startedAt,
           aggregated,
           timedOut,
           reason: message,
         });
-        return;
       }
-      settle({
-        status: "completed",
-        exitCode: code ?? 0,
-        exitSignal: exitSignal ?? null,
-        durationMs,
-        aggregated,
-        timedOut: false,
-      });
     };
 
     if (pty) {
       pty.onExit((event) => {
         const rawSignal = event.signal ?? null;
         const normalizedSignal = rawSignal === 0 ? null : rawSignal;
-        handleExit(event.exitCode ?? null, normalizedSignal);
+        void handleExit(event.exitCode ?? null, normalizedSignal);
       });
     } else if (child) {
       child.once("close", (code, exitSignal) => {
-        handleExit(code, exitSignal);
+        void handleExit(code, exitSignal);
       });
 
       child.once("error", (err) => {
@@ -1500,7 +1750,9 @@ export function createExecTool(
       const effectiveTimeout =
         typeof params.timeout === "number" ? params.timeout : defaultTimeoutSec;
       const getWarningText = () => (warnings.length ? `${warnings.join("\n")}\n\n` : "");
-      const usePty = params.pty === true && !sandbox;
+      const noPtyEnv =
+        process.env.OPENCLAW_NO_PTY === "1" || process.env.OPENCLAW_NO_PTY === "true";
+      const usePty = params.pty === true && !sandbox && !noPtyEnv;
       const run = await runExecProcess({
         command: params.command,
         workdir,
@@ -1543,9 +1795,7 @@ export function createExecTool(
                 type: "text",
                 text:
                   `${getWarningText()}` +
-                  `Command still running (session ${run.session.id}, pid ${
-                    run.session.pid ?? "n/a"
-                  }). ` +
+                  `Command still running (session ${run.session.id}, pid ${run.session.pid ?? "n/a"}). ` +
                   "Use process (list/poll/log/write/kill/clear/remove) for follow-up.",
               },
             ],
