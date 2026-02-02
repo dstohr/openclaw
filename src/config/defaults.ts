@@ -319,7 +319,7 @@ export function applyAgentDefaults(cfg: OpenClawConfig): OpenClawConfig {
 
   if (!hasModel) {
     nextDefaults.model = {
-      primary: "openai/gpt-5.2",
+      primary: "openai-codex/gpt-5.2",
       fallbacks: ["anthropic/claude-opus-4-5"],
     };
     mutated = true;
