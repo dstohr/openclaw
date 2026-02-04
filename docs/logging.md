@@ -219,6 +219,36 @@ Notes:
 - Output is still redacted according to `logging.redactSensitive`.
 - Full guide: [/diagnostics/flags](/diagnostics/flags).
 
+### Diagnostics event log (JSONL)
+
+Use this when you want **structured diagnostics events** in a local JSONL file
+for dashboards or offline analysis.
+
+```json
+{
+  "plugins": {
+    "allow": ["diagnostics-jsonl"],
+    "entries": {
+      "diagnostics-jsonl": {
+        "enabled": true
+      }
+    }
+  },
+  "diagnostics": {
+    "enabled": true,
+    "eventLog": {
+      "enabled": true,
+      "filePath": "~/.openclaw/logs/diagnostics-events.jsonl"
+    }
+  }
+}
+```
+
+Notes:
+
+- You can also enable the plugin with `openclaw plugins enable diagnostics-jsonl`.
+- Default output path: `$OPENCLAW_STATE_DIR/logs/diagnostics-events.jsonl`.
+
 ### Export to OpenTelemetry
 
 Diagnostics can be exported via the `diagnostics-otel` plugin (OTLP/HTTP). This

@@ -88,6 +88,13 @@ export const OpenClawSchema = z
           })
           .strict()
           .optional(),
+        eventLog: z
+          .object({
+            enabled: z.boolean().optional(),
+            filePath: z.string().optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),

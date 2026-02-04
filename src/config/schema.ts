@@ -123,6 +123,8 @@ const FIELD_LABELS: Record<string, string> = {
   "diagnostics.cacheTrace.includeMessages": "Cache Trace Include Messages",
   "diagnostics.cacheTrace.includePrompt": "Cache Trace Include Prompt",
   "diagnostics.cacheTrace.includeSystem": "Cache Trace Include System",
+  "diagnostics.eventLog.enabled": "Diagnostics Event Log Enabled",
+  "diagnostics.eventLog.filePath": "Diagnostics Event Log File Path",
   "agents.list.*.identity.avatar": "Identity Avatar",
   "gateway.remote.url": "Remote Gateway URL",
   "gateway.remote.sshTarget": "Remote Gateway SSH Target",
@@ -414,6 +416,10 @@ const FIELD_HELP: Record<string, string> = {
     "Include full message payloads in trace output (default: true).",
   "diagnostics.cacheTrace.includePrompt": "Include prompt text in trace output (default: true).",
   "diagnostics.cacheTrace.includeSystem": "Include system prompt in trace output (default: true).",
+  "diagnostics.eventLog.enabled":
+    "Write diagnostics events (model usage, queue, session) to JSONL (default: false).",
+  "diagnostics.eventLog.filePath":
+    "JSONL output path for diagnostics events (default: $OPENCLAW_STATE_DIR/logs/diagnostics-events.jsonl).",
   "tools.exec.applyPatch.enabled":
     "Experimental. Enables apply_patch for OpenAI models when allowed by tool policy.",
   "tools.exec.applyPatch.allowModels":
