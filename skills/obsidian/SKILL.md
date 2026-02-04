@@ -60,8 +60,12 @@ Pick a default vault (once):
 
 Search
 
-- `obsidian-cli search "query"` (note names)
-- `obsidian-cli search-content "query"` (inside notes; shows snippets + lines)
+- Note names (interactive): `obsidian-cli search`
+- Note contents (interactive): `obsidian-cli search-content "term"`
+  - Note: when **multiple notes** match, `obsidian-cli` uses an interactive picker (fzf). In non-TTY/bot contexts this often fails with `Cannot find note in vault`.
+- Note contents (non-interactive; recommended for bots/cron):
+  - `python3 scripts/obsidian_search_content.py "term" --vault "<vault-folder-name>"`
+  - Add `--json` for machine-readable output.
 
 Create
 
