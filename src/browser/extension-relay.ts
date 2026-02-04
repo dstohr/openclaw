@@ -220,6 +220,8 @@ export async function ensureChromeExtensionRelayServer(opts: {
 
   let extensionWs: WebSocket | null = null;
   const cdpClients = new Set<WebSocket>();
+  const attachedTargetsByClient = new Map<WebSocket, Set<string>>();
+  const attachedSessionsByClient = new Map<WebSocket, Set<string>>();
   const connectedTargets = new Map<string, ConnectedTarget>();
 
   const pendingExtension = new Map<
@@ -247,11 +249,85 @@ export async function ensureChromeExtensionRelayServer(opts: {
     });
   };
 
+  const trackSessionForClient = (ws: WebSocket, sessionId?: string) => {
+    if (!sessionId) {
+      return;
+    }
+    let known = attachedSessionsByClient.get(ws);
+    if (!known) {
+      known = new Set();
+      attachedSessionsByClient.set(ws, known);
+    }
+    known.add(sessionId);
+  };
+
+  const getEventSessionId = (evt: CdpEvent) =>
+    (evt as { params?: { sessionId?: string }; sessionId?: string }).params?.sessionId ??
+    (evt as { sessionId?: string }).sessionId;
+
   const broadcastToCdpClients = (evt: CdpEvent) => {
+    const msg = JSON.stringify(evt);
+    const sessionId = getEventSessionId(evt);
+    for (const ws of cdpClients) {
+      if (ws.readyState !== WebSocket.OPEN) {
+        continue;
+      }
+      if (sessionId) {
+        const known = attachedSessionsByClient.get(ws);
+        if (!known || !known.has(sessionId)) {
+          continue;
+        }
+      }
+      ws.send(msg);
+    }
+  };
+
+  const broadcastAttachedToCdpClients = (evt: CdpEvent) => {
+    const targetId = (evt as { params?: { targetInfo?: { targetId?: string } } }).params?.targetInfo
+      ?.targetId;
+    const sessionId = getEventSessionId(evt);
     const msg = JSON.stringify(evt);
     for (const ws of cdpClients) {
       if (ws.readyState !== WebSocket.OPEN) {
         continue;
+      }
+      if (targetId) {
+        let known = attachedTargetsByClient.get(ws);
+        if (!known) {
+          known = new Set();
+          attachedTargetsByClient.set(ws, known);
+        }
+        if (known.has(targetId)) {
+          continue;
+        }
+        known.add(targetId);
+      }
+      trackSessionForClient(ws, sessionId);
+      ws.send(msg);
+    }
+  };
+
+  const broadcastDetachedToCdpClients = (evt: CdpEvent) => {
+    const targetId = (evt as { params?: { targetId?: string } }).params?.targetId;
+    const sessionId = getEventSessionId(evt);
+    const msg = JSON.stringify(evt);
+    for (const ws of cdpClients) {
+      if (ws.readyState !== WebSocket.OPEN) {
+        continue;
+      }
+      if (targetId) {
+        const known = attachedTargetsByClient.get(ws);
+        if (!known || !known.has(targetId)) {
+          continue;
+        }
+        known.delete(targetId);
+      }
+      if (sessionId) {
+        const knownSessions = attachedSessionsByClient.get(ws);
+        if (!knownSessions || !knownSessions.has(sessionId)) {
+          continue;
+        }
+        knownSessions.delete(sessionId);
       }
       ws.send(msg);
     }
@@ -264,19 +340,39 @@ export async function ensureChromeExtensionRelayServer(opts: {
     ws.send(JSON.stringify(res));
   };
 
+  const sendAttachedToClient = (ws: WebSocket, evt: CdpEvent) => {
+    if (ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const targetId = (evt as { params?: { targetInfo?: { targetId?: string } } }).params?.targetInfo
+      ?.targetId;
+    const sessionId = getEventSessionId(evt);
+    if (targetId) {
+      let known = attachedTargetsByClient.get(ws);
+      if (!known) {
+        known = new Set();
+        attachedTargetsByClient.set(ws, known);
+      }
+      if (known.has(targetId)) {
+        return;
+      }
+      known.add(targetId);
+    }
+    trackSessionForClient(ws, sessionId);
+    ws.send(JSON.stringify(evt));
+  };
+
   const ensureTargetEventsForClient = (ws: WebSocket, mode: "autoAttach" | "discover") => {
     for (const target of connectedTargets.values()) {
       if (mode === "autoAttach") {
-        ws.send(
-          JSON.stringify({
-            method: "Target.attachedToTarget",
-            params: {
-              sessionId: target.sessionId,
-              targetInfo: { ...target.targetInfo, attached: true },
-              waitingForDebugger: false,
-            },
-          } satisfies CdpEvent),
-        );
+        sendAttachedToClient(ws, {
+          method: "Target.attachedToTarget",
+          params: {
+            sessionId: target.sessionId,
+            targetInfo: { ...target.targetInfo, attached: true },
+            waitingForDebugger: false,
+          },
+        } satisfies CdpEvent);
       } else {
         ws.send(
           JSON.stringify({
@@ -341,6 +437,15 @@ export async function ensureChromeExtensionRelayServer(opts: {
           }
         }
         throw new Error("target not found");
+      }
+      case "Target.attachToBrowserTarget": {
+        // Extension relay connections are tab-scoped; treat the first attached tab
+        // as the browser target to satisfy Playwright's handshake.
+        const first = Array.from(connectedTargets.values())[0];
+        if (!first) {
+          throw new Error("No attached tab");
+        }
+        return { sessionId: first.sessionId };
       }
       default: {
         const id = nextExtensionId++;
@@ -575,14 +680,10 @@ export async function ensureChromeExtensionRelayServer(opts: {
         if (!method || typeof method !== "string") {
           return;
         }
-
         if (method === "Target.attachedToTarget") {
           const attached = (params ?? {}) as AttachedToTargetEvent;
           const targetType = attached?.targetInfo?.type ?? "page";
-          if (targetType !== "page") {
-            return;
-          }
-          if (attached?.sessionId && attached?.targetInfo?.targetId) {
+          if (targetType === "page" && attached?.sessionId && attached?.targetInfo?.targetId) {
             const prev = connectedTargets.get(attached.sessionId);
             const nextTargetId = attached.targetInfo.targetId;
             const prevTargetId = prev?.targetId;
@@ -593,17 +694,20 @@ export async function ensureChromeExtensionRelayServer(opts: {
               targetInfo: attached.targetInfo,
             });
             if (changedTarget && prevTargetId) {
-              broadcastToCdpClients({
+              broadcastDetachedToCdpClients({
                 method: "Target.detachedFromTarget",
                 params: { sessionId: attached.sessionId, targetId: prevTargetId },
                 sessionId: attached.sessionId,
               });
             }
             if (!prev || changedTarget) {
-              broadcastToCdpClients({ method, params, sessionId });
+              broadcastAttachedToCdpClients({ method, params, sessionId });
             }
             return;
           }
+          // Forward non-page attached targets too (Playwright expects these sessions).
+          broadcastAttachedToCdpClients({ method, params, sessionId });
+          return;
         }
 
         if (method === "Target.detachedFromTarget") {
@@ -611,7 +715,7 @@ export async function ensureChromeExtensionRelayServer(opts: {
           if (detached?.sessionId) {
             connectedTargets.delete(detached.sessionId);
           }
-          broadcastToCdpClients({ method, params, sessionId });
+          broadcastDetachedToCdpClients({ method, params, sessionId });
           return;
         }
 
@@ -647,6 +751,8 @@ export async function ensureChromeExtensionRelayServer(opts: {
       }
       pendingExtension.clear();
       connectedTargets.clear();
+      attachedTargetsByClient.clear();
+      attachedSessionsByClient.clear();
 
       for (const client of cdpClients) {
         try {
@@ -661,6 +767,8 @@ export async function ensureChromeExtensionRelayServer(opts: {
 
   wssCdp.on("connection", (ws) => {
     cdpClients.add(ws);
+    attachedTargetsByClient.set(ws, new Set());
+    attachedSessionsByClient.set(ws, new Set());
 
     ws.on("message", async (data) => {
       let cmd: CdpCommand | null = null;
@@ -705,16 +813,14 @@ export async function ensureChromeExtensionRelayServer(opts: {
               (t) => t.targetId === targetId,
             );
             if (target) {
-              ws.send(
-                JSON.stringify({
-                  method: "Target.attachedToTarget",
-                  params: {
-                    sessionId: target.sessionId,
-                    targetInfo: { ...target.targetInfo, attached: true },
-                    waitingForDebugger: false,
-                  },
-                } satisfies CdpEvent),
-              );
+              sendAttachedToClient(ws, {
+                method: "Target.attachedToTarget",
+                params: {
+                  sessionId: target.sessionId,
+                  targetInfo: { ...target.targetInfo, attached: true },
+                  waitingForDebugger: false,
+                },
+              } satisfies CdpEvent);
             }
           }
         }
@@ -731,6 +837,8 @@ export async function ensureChromeExtensionRelayServer(opts: {
 
     ws.on("close", () => {
       cdpClients.delete(ws);
+      attachedTargetsByClient.delete(ws);
+      attachedSessionsByClient.delete(ws);
     });
   });
 
