@@ -2,6 +2,31 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+function isWSL(): boolean {
+  try {
+    const release = fs.readFileSync("/proc/sys/kernel/osrelease", "utf8");
+    return /microsoft|wsl/i.test(release);
+  } catch {
+    return false;
+  }
+}
+
+function resolveWSLPowerShellPath(): string {
+  // In WSL, Windows exe files are invoked via /init (binfmt_misc WSLInterop).
+  // If the binfmt entry is missing, fall back to a ~/.local/bin wrapper.
+  // Try wrapper first (handles missing binfmt_misc entry gracefully).
+  const wrapperPath = path.join(process.env.HOME ?? "/root", ".local/bin/powershell.exe");
+  if (fs.existsSync(wrapperPath)) {
+    return wrapperPath;
+  }
+  // Direct path via /c Windows drive mount (requires binfmt_misc WSLInterop)
+  const winPsPath = "/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
+  if (fs.existsSync(winPsPath)) {
+    return winPsPath;
+  }
+  return "powershell.exe";
+}
+
 export function resolvePowerShellPath(): string {
   // Prefer PowerShell 7 when available; PS 5.1 lacks "&&" support.
   const programFiles = process.env.ProgramFiles || process.env.PROGRAMFILES || "C:\\Program Files";
@@ -50,6 +75,20 @@ export function getShellConfig(): { shell: string; args: string[] } {
       shell: resolvePowerShellPath(),
       args: ["-NoProfile", "-NonInteractive", "-Command"],
     };
+  }
+
+  if (isWSL()) {
+    // In WSL, allow running PowerShell on the Windows host when explicitly requested
+    // via CLAWDBOT_SHELL=powershell or CLAWDBOT_USE_WINDOWS_SHELL=1.
+    if (
+      process.env.CLAWDBOT_SHELL?.toLowerCase().includes("powershell") ||
+      process.env.CLAWDBOT_USE_WINDOWS_SHELL === "1"
+    ) {
+      return {
+        shell: resolveWSLPowerShellPath(),
+        args: ["-NoProfile", "-NonInteractive", "-Command"],
+      };
+    }
   }
 
   const envShell = process.env.SHELL?.trim();

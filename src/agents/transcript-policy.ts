@@ -95,14 +95,16 @@ export function resolveTranscriptPolicy(params: {
     modelId.toLowerCase().includes("gemini");
   const isCopilotClaude = provider === "github-copilot" && modelId.toLowerCase().includes("claude");
 
-  // GitHub Copilot's Claude endpoints can reject persisted `thinking` blocks with
-  // non-binary/non-base64 signatures (e.g. thinkingSignature: "reasoning_text").
-  // Drop these blocks at send-time to keep sessions usable.
-  const dropThinkingBlocks = isCopilotClaude;
+  // Claude-family endpoints can reject replayed `thinking` blocks if any history
+  // sanitation/compaction changed them. Drop these blocks at send-time so follow-ups
+  // don't fail on strict replay checks.
+  const dropThinkingBlocks = isCopilotClaude || isAnthropic;
 
-  const needsNonImageSanitize = isGoogle || isAnthropic || isMistral || isOpenRouterGemini;
+  const needsNonImageSanitize = isGoogle || isMistral || isOpenRouterGemini;
 
-  const sanitizeToolCallIds = isGoogle || isMistral || isAnthropic;
+  // Anthropic requires replaying the latest assistant reasoning blocks exactly.
+  // Rewriting tool ids in assistant turns can trip strict replay checks.
+  const sanitizeToolCallIds = isGoogle || isMistral;
   const toolCallIdMode: ToolCallIdMode | undefined = isMistral
     ? "strict9"
     : sanitizeToolCallIds

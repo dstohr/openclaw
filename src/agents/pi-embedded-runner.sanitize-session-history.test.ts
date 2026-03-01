@@ -109,7 +109,7 @@ describe("sanitizeSessionHistory", () => {
     );
   });
 
-  it("sanitizes tool call ids for Anthropic APIs", async () => {
+  it("does not sanitize tool call ids for Anthropic APIs", async () => {
     setNonGoogleModelApi();
 
     await sanitizeSessionHistory({
@@ -123,7 +123,7 @@ describe("sanitizeSessionHistory", () => {
     expect(helpers.sanitizeSessionMessagesImages).toHaveBeenCalledWith(
       mockMessages,
       "session:history",
-      expect.objectContaining({ sanitizeMode: "full", sanitizeToolCallIds: true }),
+      expect.objectContaining({ sanitizeMode: "images-only", sanitizeToolCallIds: false }),
     );
   });
 
@@ -633,7 +633,7 @@ describe("sanitizeSessionHistory", () => {
     expect(types).not.toContain("thinking");
   });
 
-  it("does not drop thinking blocks for non-copilot providers", async () => {
+  it("drops assistant thinking blocks for Anthropic providers", async () => {
     setNonGoogleModelApi();
 
     const messages = makeThinkingAndTextAssistantMessages();
@@ -643,6 +643,24 @@ describe("sanitizeSessionHistory", () => {
       modelApi: "anthropic-messages",
       provider: "anthropic",
       modelId: "claude-opus-4-6",
+      sessionManager: makeMockSessionManager(),
+      sessionId: TEST_SESSION_ID,
+    });
+
+    const assistant = getAssistantMessage(result);
+    expect(assistant.content).toEqual([{ type: "text", text: "hi" }]);
+  });
+
+  it("does not drop thinking blocks for non-copilot non-anthropic providers", async () => {
+    setNonGoogleModelApi();
+
+    const messages = makeThinkingAndTextAssistantMessages();
+
+    const result = await sanitizeSessionHistory({
+      messages,
+      modelApi: "openai-completions",
+      provider: "openrouter",
+      modelId: "openai/gpt-4.1",
       sessionManager: makeMockSessionManager(),
       sessionId: TEST_SESSION_ID,
     });
