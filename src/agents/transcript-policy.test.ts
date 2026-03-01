@@ -2,14 +2,16 @@ import { describe, expect, it } from "vitest";
 import { resolveTranscriptPolicy } from "./transcript-policy.js";
 
 describe("resolveTranscriptPolicy", () => {
-  it("enables sanitizeToolCallIds for Anthropic provider", () => {
+  it("does not sanitize tool call ids for Anthropic provider", () => {
     const policy = resolveTranscriptPolicy({
       provider: "anthropic",
       modelId: "claude-opus-4-5",
       modelApi: "anthropic-messages",
     });
-    expect(policy.sanitizeToolCallIds).toBe(true);
-    expect(policy.toolCallIdMode).toBe("strict");
+    expect(policy.sanitizeToolCallIds).toBe(false);
+    expect(policy.toolCallIdMode).toBeUndefined();
+    expect(policy.sanitizeMode).toBe("images-only");
+    expect(policy.dropThinkingBlocks).toBe(true);
   });
 
   it("enables sanitizeToolCallIds for Google provider", () => {
@@ -42,6 +44,7 @@ describe("resolveTranscriptPolicy", () => {
     });
     expect(policy.sanitizeToolCallIds).toBe(false);
     expect(policy.toolCallIdMode).toBeUndefined();
+    expect(policy.dropThinkingBlocks).toBe(false);
   });
 
   it("enables strict tool call id sanitization for openai-completions APIs", () => {
@@ -74,8 +77,8 @@ describe("resolveTranscriptPolicy", () => {
     expect(policy.repairToolUseResultPairing).toBe(true);
     expect(policy.validateAnthropicTurns).toBe(true);
     expect(policy.allowSyntheticToolResults).toBe(true);
-    expect(policy.sanitizeToolCallIds).toBe(true);
-    expect(policy.sanitizeMode).toBe("full");
+    expect(policy.sanitizeToolCallIds).toBe(false);
+    expect(policy.sanitizeMode).toBe("images-only");
   });
 
   it.each([

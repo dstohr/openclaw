@@ -80,16 +80,18 @@ export function resolveTranscriptPolicy(params: {
     });
   const requiresOpenAiCompatibleToolIdSanitization = params.modelApi === "openai-completions";
 
-  // GitHub Copilot's Claude endpoints can reject persisted `thinking` blocks with
-  // non-binary/non-base64 signatures (e.g. thinkingSignature: "reasoning_text").
-  // Drop these blocks at send-time to keep sessions usable.
-  const dropThinkingBlocks = shouldDropThinkingBlocksForModel({ provider, modelId });
+  // Claude-family endpoints can reject replayed `thinking` blocks after history
+  // sanitation/compaction. Drop them for Anthropic routes and for providers that
+  // opt specific models into the same behavior.
+  const dropThinkingBlocks = isAnthropic || shouldDropThinkingBlocksForModel({ provider, modelId });
 
   const needsNonImageSanitize =
-    isGoogle || isAnthropic || isMistral || shouldSanitizeGeminiThoughtSignaturesForProvider;
+    isGoogle || isMistral || shouldSanitizeGeminiThoughtSignaturesForProvider;
 
+  // Anthropic requires replaying the latest assistant reasoning blocks exactly.
+  // Rewriting tool ids in assistant turns can trip strict replay checks.
   const sanitizeToolCallIds =
-    isGoogle || isMistral || isAnthropic || requiresOpenAiCompatibleToolIdSanitization;
+    isGoogle || isMistral || requiresOpenAiCompatibleToolIdSanitization;
   const toolCallIdMode: ToolCallIdMode | undefined = providerToolCallIdMode
     ? providerToolCallIdMode
     : isMistral
