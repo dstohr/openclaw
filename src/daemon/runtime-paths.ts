@@ -144,9 +144,21 @@ export async function resolveSystemNodeInfo(params: {
 export function renderSystemNodeWarning(
   systemNode: SystemNodeInfo | null,
   selectedNodePath?: string,
+  platform: NodeJS.Platform = process.platform,
 ): string | null {
   if (!systemNode || systemNode.supported) {
     return null;
+  }
+  if (selectedNodePath) {
+    const selectedNormalized = normalizeForCompare(selectedNodePath, platform);
+    const systemNormalized = normalizeForCompare(systemNode.path, platform);
+    const selectedIsSystemNode = selectedNormalized === systemNormalized;
+    const selectedIsVersionManaged = isVersionManagedNodePath(selectedNodePath, platform);
+    // If the daemon is already pinned to a non-system, non-version-manager Node,
+    // a stale system Node should not produce a warning.
+    if (!selectedIsSystemNode && !selectedIsVersionManaged) {
+      return null;
+    }
   }
   const versionLabel = systemNode.version ?? "unknown";
   const selectedLabel = selectedNodePath ? ` Using ${selectedNodePath} for the daemon.` : "";
