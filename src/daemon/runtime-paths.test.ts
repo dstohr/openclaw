@@ -254,4 +254,18 @@ describe("resolveSystemNodeInfo", () => {
     expect(warning).toContain("below the required Node 22+");
     expect(warning).toContain(darwinNode);
   });
+
+  it("suppresses warning when daemon is pinned to a non-system stable node", () => {
+    const warning = renderSystemNodeWarning(
+      {
+        path: darwinNode,
+        version: "18.19.0",
+        supported: false,
+      },
+      "/Users/me/.local/node-v22.22.0/bin/node",
+      "darwin",
+    );
+
+    expect(warning).toBeNull();
+  });
 });

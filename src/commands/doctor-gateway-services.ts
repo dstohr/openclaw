@@ -242,12 +242,17 @@ export async function maybeRepairGatewayServiceConfig(
     });
   }
   const needsNodeRuntime = needsNodeRuntimeMigration(audit.issues);
+  const runtimeChoice = detectGatewayRuntime(command.programArguments);
+  const selectedNodeProgram =
+    runtimeChoice === "node" && command.programArguments && command.programArguments.length > 0
+      ? command.programArguments[0]
+      : undefined;
   const systemNodeInfo = needsNodeRuntime
     ? await resolveSystemNodeInfo({ env: process.env })
     : null;
   const systemNodePath = systemNodeInfo?.supported ? systemNodeInfo.path : null;
   if (needsNodeRuntime && !systemNodePath) {
-    const warning = renderSystemNodeWarning(systemNodeInfo);
+    const warning = renderSystemNodeWarning(systemNodeInfo, selectedNodeProgram);
     if (warning) {
       note(warning, "Gateway runtime");
     }
@@ -258,7 +263,6 @@ export async function maybeRepairGatewayServiceConfig(
   }
 
   const port = resolveGatewayPort(cfg, process.env);
-  const runtimeChoice = detectGatewayRuntime(command.programArguments);
   const { programArguments } = await buildGatewayInstallPlan({
     env: process.env,
     port,
